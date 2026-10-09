@@ -30,7 +30,7 @@ Requires macOS 13 or later and Xcode or Apple's Command Line Tools. Built and us
 4. Copy text normally. Click the clipboard icon in the menu bar to view history.
 5. Click an item to copy it back, then return to your app and press **Command-V** to paste.
 
-**Command-E overrides other apps' Command-E action while Clips is running.** The shortcut is currently fixed. Settings are in the gear menu. Start-at-login registration may require approval in System Settings.
+**Command-E is the default.** To change it, open the gear menu → **Keyboard Shortcut…**, choose modifiers and a letter or number, then Save. At least Command, Option, or Control is required; Shift is optional. The chosen combination overrides that shortcut in other apps while Clips runs. Changes take effect immediately and are saved between launches. If registration fails, the previous shortcut stays active. **Default** restores Command-E in the editor; Save applies it. Settings are in the gear menu. Start-at-login registration may require approval in System Settings.
 
 The app is signed locally, not notarized. This repository provides source and a build script, not a signed installer.
 
@@ -59,6 +59,6 @@ Implementation: `Sources/Clips.swift`. Quit Clips before rebuilding.
 ./Clips.app/Contents/MacOS/Clips --test
 ```
 
-The executable checks retention limits, duplicate favorites, more favorites than the history limit, serialization, and clearing recent history while preserving favorites. Native compilation and local code signature verification passed.
+The executable checks shortcut defaults, modifier combinations, validation and serialization, plus retention limits, duplicate favorites, more favorites than the history limit, serialization, and clearing recent history while preserving favorites. Native compilation and local code signature verification passed.
 
 Live checks covered text capture, favoriting, persistence after relaunch, Command-E reopening, multiple selection, and favorite-deletion confirmation/cancellation. Range selection, resize persistence, outside-click behavior across apps, and login registration still need broader end-to-end testing. These checks are not a compatibility guarantee.

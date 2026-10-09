@@ -3,6 +3,34 @@ import SwiftUI
 import ServiceManagement
 import Carbon
 
+struct Shortcut: Codable, Equatable {
+    var key: UInt32 = UInt32(kVK_ANSI_E)
+    var command = true
+    var option = false
+    var control = false
+    var shift = false
+    static let keys: [(String, UInt32)] = [
+        ("A",0),("B",11),("C",8),("D",2),("E",14),("F",3),("G",5),
+        ("H",4),("I",34),("J",38),("K",40),("L",37),("M",46),("N",45),
+        ("O",31),("P",35),("Q",12),("R",15),("S",1),("T",17),("U",32),
+        ("V",9),("W",13),("X",7),("Y",16),("Z",6),
+        ("0",29),("1",18),("2",19),("3",20),("4",21),("5",23),("6",22),("7",26),("8",28),("9",25)
+    ]
+    var valid: Bool { (command || option || control) && Self.keys.contains { $0.1 == key } }
+    var modifiers: UInt32 {
+        (command ? UInt32(cmdKey) : 0) | (option ? UInt32(optionKey) : 0) |
+        (control ? UInt32(controlKey) : 0) | (shift ? UInt32(shiftKey) : 0)
+    }
+    var label: String {
+        (control ? "⌃" : "") + (option ? "⌥" : "") + (shift ? "⇧" : "") +
+        (command ? "⌘" : "") + (Self.keys.first { $0.1 == key }?.0 ?? "?")
+    }
+    static func load() -> Shortcut {
+        guard let data = UserDefaults.standard.data(forKey: "keyboardShortcut"),
+              let value = try? JSONDecoder().decode(Shortcut.self, from: data), value.valid else { return Shortcut() }
+        return value
+    }
+}
 struct Clip: Codable, Identifiable {
     var id = UUID()
     var text: String
@@ -34,6 +62,8 @@ struct Archive: Codable {
 final class Store: ObservableObject {
     @Published var archive = Archive()
     @Published var error: String?
+    @Published var shortcut = Shortcut.load()
+    var applyShortcut: ((Shortcut) -> String?)?
     @Published var login = SMAppService.mainApp.status == .enabled
     private var change = NSPasteboard.general.changeCount
     private var timer: Timer?
@@ -135,11 +165,45 @@ final class GripView: NSView {
     }
     override func mouseUp(with event: NSEvent) { window?.saveFrame(usingName: "ClipsHistoryWindow") }
 }
+struct ShortcutSettings: View {
+    @ObservedObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = Shortcut()
+    @State private var error: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Keyboard shortcut").font(.headline)
+            HStack {
+                Toggle("⌘", isOn: $draft.command)
+                Toggle("⌥", isOn: $draft.option)
+                Toggle("⌃", isOn: $draft.control)
+                Toggle("⇧", isOn: $draft.shift)
+            }.toggleStyle(.checkbox)
+            Picker("Key", selection: $draft.key) {
+                ForEach(Shortcut.keys, id: \.1) { Text($0.0).tag($0.1) }
+            }
+            Text(draft.label).font(.title3.monospaced())
+            Text("Choose Command, Option, or Control plus a key. This replaces that combination in other apps while Clips runs.").font(.caption).foregroundStyle(.secondary)
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Button("Default") { draft = Shortcut(); error = nil }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    guard let apply = store.applyShortcut else { error = "Shortcut service is unavailable."; return }
+                    if let message = apply(draft) { error = message } else { dismiss() }
+                }.disabled(!draft.valid)
+            }
+        }.padding(16).frame(width: 280)
+        .onAppear { draft = store.shortcut }
+    }
+}
 struct ClipboardView: View {
     @ObservedObject var store: Store
     var close: () -> Void
     @State private var query = ""
     @State private var confirmClear = false
+    @State private var shortcutSettings = false
     @State private var pendingDelete: Set<UUID> = []
     @State private var selected: Set<UUID> = []
     @State private var selectionAnchor: UUID?
@@ -181,6 +245,7 @@ struct ClipboardView: View {
                     Picker("History limit", selection: Binding(get: { store.archive.limit }, set: store.setLimit)) {
                         ForEach([50,100,200], id: \.self) { Text("\($0) recent items").tag($0) }
                     }
+                    Button("Keyboard Shortcut…") { shortcutSettings = true }
                     Toggle("Pause history", isOn: Binding(get: { store.archive.paused }, set: store.pause))
                     Toggle("Start at login", isOn: Binding(get: { store.login }, set: store.setLogin))
                     Button("Clear recent history…") { confirmClear = true }
@@ -244,6 +309,7 @@ struct ClipboardView: View {
         .overlay(alignment: .bottomTrailing) { ResizeGrip().frame(width: 18, height: 18).padding(3) }
         .onChange(of: query) { _ in selected.removeAll(); selectionAnchor = nil }
         .onChange(of: store.archive.clips.map(\.id)) { ids in selected.formIntersection(Set(ids)) }
+        .sheet(isPresented: $shortcutSettings) { ShortcutSettings(store: store) }
         .alert("Delete selected favorites?", isPresented: $confirmDelete) {
             Button("Cancel", role: .cancel) { pendingDelete.removeAll() }
             Button("Delete", role: .destructive) {
@@ -297,11 +363,15 @@ final class Delegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.panel.orderOut(nil) }
         }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53, self?.panel.isVisible == true {
+            if event.keyCode == 53, self?.panel.isVisible == true, self?.panel.attachedSheet == nil {
                 self?.panel.orderOut(nil)
                 return nil
             }
             return event
+        }
+        store.applyShortcut = { [weak self] value in
+            guard let self else { return "Shortcut service is unavailable." }
+            return self.updateShortcut(value)
         }
         installShortcut()
         show()
@@ -314,11 +384,27 @@ final class Delegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in delegate.toggle() }
             return noErr
         }, 1, &event, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        let registered = RegisterEventHotKey(UInt32(kVK_ANSI_E), UInt32(cmdKey),
-                            EventHotKeyID(signature: 0x434C4950, id: 1), GetApplicationEventTarget(), 0, &hotKey)
-        if installed != noErr || registered != noErr {
-            store.error = "⌘E could not be registered. Another app may be using it. The menu-bar icon still opens Clips."
+        if installed != noErr {
+            store.error = "Keyboard shortcut setup failed. Use the menu-bar icon."
+        } else if let message = updateShortcut(store.shortcut) { store.error = message }
+    }
+    func updateShortcut(_ value: Shortcut) -> String? {
+        guard value.valid else { return "Choose a key and at least Command, Option, or Control." }
+        guard handler != nil else { return "Keyboard shortcut setup failed. Restart Clips to try again." }
+        if value == store.shortcut, hotKey != nil { return nil }
+        var replacement: EventHotKeyRef?
+        let status = RegisterEventHotKey(value.key, value.modifiers,
+            EventHotKeyID(signature: 0x434C4950, id: 1), GetApplicationEventTarget(), 0, &replacement)
+        guard status == noErr, let replacement else {
+            return "That shortcut is unavailable. Try another combination; your previous shortcut is unchanged."
         }
+        if let old = hotKey { UnregisterEventHotKey(old) }
+        hotKey = replacement
+        store.shortcut = value
+        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: "keyboardShortcut") }
+        item.button?.toolTip = "Clips — clipboard history (\(value.label))"
+        panel.title = "Clips · \(value.label)"
+        return nil
     }
     func show() {
         let pointer = NSEvent.mouseLocation
@@ -354,6 +440,17 @@ final class Delegate: NSObject, NSApplicationDelegate {
 struct Main {
     @MainActor static func main() {
         if CommandLine.arguments.contains("--test") {
+            let defaultShortcut = Shortcut()
+            precondition(defaultShortcut.valid && defaultShortcut.label == "⌘E" && defaultShortcut.modifiers == UInt32(cmdKey))
+            var alternate = Shortcut(key: 8, command: false, option: true, control: true, shift: true)
+            precondition(alternate.valid && alternate.label == "⌃⌥⇧C")
+            precondition(try! JSONDecoder().decode(Shortcut.self, from: JSONEncoder().encode(alternate)) == alternate)
+            alternate.option = false; alternate.control = false
+            precondition(!alternate.valid)
+            alternate.command = true; alternate.key = 999
+            precondition(!alternate.valid)
+            precondition(Set(Shortcut.keys.map { $0.1 }).count == Shortcut.keys.count)
+            print("PASS: shortcut defaults, modifier combinations, validation, persistence, unique keys")
             var a = Archive(limit: 50)
             a.add("favorite"); a.clips[0].favorite = true
             for i in 0..<205 { a.add("item \(i)") }
